@@ -65,6 +65,7 @@ public class AuthService {
         user.setIsVerified(false);
         user.setIsActive(false);
         user.setPasswordSet(false);
+        user.setPasswordHash(passwordEncoder.encode(UUID.randomUUID().toString()));
 
         user = userRepository.save(user);
 
@@ -125,6 +126,7 @@ public class AuthService {
         user.setIsVerified(false);
         user.setIsActive(false);
         user.setPasswordSet(false);
+        user.setPasswordHash(passwordEncoder.encode(UUID.randomUUID().toString()));
 
         user = userRepository.save(user);
 

@@ -20,7 +20,7 @@ import java.util.UUID;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.stream.Collectors;
-
+import com.prescription.dto.UserLogResponse;
 @Service
 public class UserService {
 
@@ -131,6 +131,35 @@ public class UserService {
         return users.stream()
                 .map(this::convertToDTO)
                 .collect(Collectors.toList());
+    }
+
+    public List<UserLogResponse> getUserLogs() {
+        return userRepository.findAllByOrderByLastLoginDesc()
+                .stream()
+                .map(this::toLogResponse)
+                .collect(Collectors.toList());
+    }
+
+    // ADD this import at the top
+
+
+    // REPLACE toLogResponse with:
+    private UserLogResponse toLogResponse(User user) {
+        UserLogResponse r = new UserLogResponse();
+        r.setUserId(user.getUserId());
+        r.setFullName(user.getFullName());
+        r.setEmail(user.getEmail());
+        r.setRole(user.getRole().name());
+        r.setIsActive(user.getIsActive());
+        r.setIsVerified(user.getIsVerified());
+        r.setAccountStatus(user.getAccountStatus().name());  // ← .name() — enum to String
+        r.setCnic(user.getCnic());
+        r.setCreatedAt(user.getCreatedAt());
+        r.setLastLogin(user.getLastLogin());
+        r.setUpdatedAt(user.getUpdatedAt());
+        r.setAdminNotes(user.getAdminNotes());
+        r.setRejectionReason(user.getRejectionReason());
+        return r;
     }
 
     @Transactional

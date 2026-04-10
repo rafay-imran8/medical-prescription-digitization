@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
+import com.prescription.dto.UserLogResponse;
 
 import java.util.List;
 import java.util.Map;
@@ -37,6 +38,17 @@ public class AdminController {
         }
     }
 
+
+    @GetMapping("/users/logs")
+    public ResponseEntity<ApiResponse<List<UserLogResponse>>> getUserLogs() {
+        try {
+            List<UserLogResponse> logs = userService.getUserLogs();  // ← was adminService
+            return ResponseEntity.ok(ApiResponse.success(logs));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest()
+                    .body(ApiResponse.error(e.getMessage()));
+        }
+    }
     @PutMapping("/users/{userId}/status")
     public ResponseEntity<ApiResponse<UserDTO>> updateUserStatus(
             @PathVariable Long userId,

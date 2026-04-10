@@ -48,8 +48,23 @@ public class PrescriptionService {
     @Autowired
     private PrescriptionImageRepository imageRepository;
 
+    /**
+     * app_schema.drug_interactions — per-prescription rows saved at upload time.
+     * Used by saveDrugInteractionsFromAIResult() and buildPrescriptionResponse().
+     */
     @Autowired
-    private DrugInteractionRepository interactionRepository;
+    private DrugInteractionRepository drugInteractionRepository;
+
+    @Autowired
+    private DuplicateIngredientWarningRepository duplicateWarningRepository;
+
+    /**
+     * drugbank_schema.drug_interactions — DrugBank reference data.
+     * Phase 4 runs in Python (FastAPI), so this repo is wired for future
+     * Java-side lookups only. Not called in the current pipeline.
+     */
+    @Autowired
+    private DrugbankInteractionRepository drugbankInteractionRepository;
 
     @Autowired
     private ProcessingLogRepository processingLogRepository;
@@ -66,19 +81,20 @@ public class PrescriptionService {
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    // =========================================================================
+    // Upload + Process (scanned prescription)
+    // =========================================================================
+
     @Transactional
     public PrescriptionResponse uploadAndProcessPrescription(Long patientId, MultipartFile image) throws IOException {
-        // Get patient
         Patient patient = patientRepository.findById(patientId)
                 .orElseThrow(() -> new RuntimeException("Patient not found"));
 
-        // Save image to storage
         String storedFilename = UUID.randomUUID().toString() + "_" + image.getOriginalFilename();
         Path imagePath = Paths.get(imageStoragePath, storedFilename);
         Files.createDirectories(imagePath.getParent());
         Files.write(imagePath, image.getBytes());
 
-        // Create prescription record
         Prescription prescription = new Prescription();
         prescription.setPatient(patient);
         prescription.setPrescriptionType(Prescription.PrescriptionType.SCANNED);
@@ -86,7 +102,6 @@ public class PrescriptionService {
         prescription.setImagePath(imagePath.toString());
         prescription = prescriptionRepository.save(prescription);
 
-        // Save image metadata
         PrescriptionImage prescriptionImage = new PrescriptionImage();
         prescriptionImage.setPrescription(prescription);
         prescriptionImage.setOriginalFilename(image.getOriginalFilename());
@@ -97,46 +112,39 @@ public class PrescriptionService {
         imageRepository.save(prescriptionImage);
 
         try {
-            // Call FastAPI for AI processing
             System.out.println("Calling FastAPI for image: " + imagePath);
             JsonNode aiResult = callFastApiForProcessing(imagePath.toFile());
             System.out.println("FastAPI response received: " + aiResult);
 
-            // Check if result exists
             if (!aiResult.has("result")) {
                 throw new RuntimeException("Invalid response from AI service: missing 'result' field");
             }
 
             JsonNode resultNode = aiResult.get("result");
 
-            // Update prescription with patient info
             updatePrescriptionFromAIResult(prescription, resultNode);
-
-            // Save medicines
             saveMedicinesFromAIResult(prescription, resultNode);
-
-            // Save drug interactions
             saveDrugInteractionsFromAIResult(prescription, resultNode);
+            saveDuplicateWarningsFromAIResult(prescription, resultNode);
 
-            // Update processing status
             prescription.setProcessingStatus("COMPLETED");
             prescription = prescriptionRepository.save(prescription);
 
-            System.out.println("Prescription processing completed successfully: " + prescription.getPrescriptionId());
-
-            // Build and return response
-            return buildPrescriptionResponse(prescription);
+            System.out.println("Prescription processing completed: " + prescription.getPrescriptionId());
+            return buildPrescriptionResponse(prescription, resultNode);
 
         } catch (Exception e) {
             System.err.println("Error processing prescription: " + e.getMessage());
             e.printStackTrace();
-
             prescription.setProcessingStatus("FAILED");
             prescriptionRepository.save(prescription);
-
             throw new RuntimeException("Failed to process prescription: " + e.getMessage(), e);
         }
     }
+
+    // =========================================================================
+    // FastAPI call
+    // =========================================================================
 
     private JsonNode callFastApiForProcessing(File imageFile) throws IOException {
         String url = fastApiUrl + "/analyze-prescription";
@@ -150,10 +158,7 @@ public class PrescriptionService {
         HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
 
         ResponseEntity<String> response = restTemplate.exchange(
-                url,
-                HttpMethod.POST,
-                requestEntity,
-                String.class
+                url, HttpMethod.POST, requestEntity, String.class
         );
 
         if (response.getStatusCode() != HttpStatus.OK) {
@@ -163,18 +168,20 @@ public class PrescriptionService {
         return objectMapper.readTree(response.getBody());
     }
 
+    // =========================================================================
+    // Update prescription fields from AI result
+    // =========================================================================
+
     private void updatePrescriptionFromAIResult(Prescription prescription, JsonNode resultNode) {
         try {
-            // Patient info
             if (resultNode.has("patient_info") && !resultNode.get("patient_info").isNull()) {
                 JsonNode patientInfo = resultNode.get("patient_info");
-
-                // Parse date safely
                 if (patientInfo.has("Date")) {
                     String dateStr = patientInfo.get("Date").asText();
                     if (dateStr != null && !dateStr.isEmpty()) {
                         try {
-                            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("[dd-MM-yyyy][yyyy-MM-dd][MM/dd/yyyy][dd/MM/yyyy]");
+                            DateTimeFormatter formatter = DateTimeFormatter.ofPattern(
+                                    "[dd-MM-yyyy][yyyy-MM-dd][MM/dd/yyyy][dd/MM/yyyy]");
                             prescription.setPrescriptionDate(LocalDate.parse(dateStr, formatter));
                         } catch (Exception e) {
                             System.err.println("Failed to parse date: " + dateStr);
@@ -183,7 +190,6 @@ public class PrescriptionService {
                 }
             }
 
-            // Vitals
             if (resultNode.has("vitals") && !resultNode.get("vitals").isNull()) {
                 JsonNode vitals = resultNode.get("vitals");
                 prescription.setWeight(vitals.path("Weight").asText(null));
@@ -191,24 +197,23 @@ public class PrescriptionService {
                 prescription.setBloodPressure(vitals.path("Blood_Pressure").asText(null));
             }
 
-            // Clinical info
             if (resultNode.has("clinical_info") && !resultNode.get("clinical_info").isNull()) {
                 JsonNode clinicalInfo = resultNode.get("clinical_info");
                 prescription.setDiagnosis(clinicalInfo.path("Diagnosis").asText(null));
                 prescription.setPatientHistory(clinicalInfo.path("Patient_History").asText(null));
             }
 
-            // Store full LLM-corrected JSON
             prescription.setLlmCorrectedJson(objectMapper.writeValueAsString(resultNode));
-
             prescriptionRepository.save(prescription);
-            System.out.println("Prescription updated with AI data");
 
         } catch (Exception e) {
             System.err.println("Error updating prescription from AI result: " + e.getMessage());
-            e.printStackTrace();
         }
     }
+
+    // =========================================================================
+    // Save medicines
+    // =========================================================================
 
     private void saveMedicinesFromAIResult(Prescription prescription, JsonNode resultNode) {
         try {
@@ -218,52 +223,35 @@ public class PrescriptionService {
             }
 
             JsonNode prescriptionArray = resultNode.get("prescription");
-            if (!prescriptionArray.isArray()) {
-                System.out.println("Prescription field is not an array");
-                return;
-            }
+            if (!prescriptionArray.isArray()) return;
 
             int count = 0;
             for (JsonNode medicineNode : prescriptionArray) {
                 PrescriptionMedicine medicine = new PrescriptionMedicine();
                 medicine.setPrescription(prescription);
 
-                // Required field
                 String medicineName = medicineNode.path("Medicine_Name").asText(null);
-                if (medicineName == null || medicineName.isEmpty()) {
-                    System.out.println("Skipping medicine with no name");
-                    continue;
-                }
-                medicine.setMedicineName(medicineName);
+                if (medicineName == null || medicineName.isEmpty()) continue;
 
-                // Optional fields
+                medicine.setMedicineName(medicineName);
                 medicine.setMedicineType(medicineNode.path("Medicine_Type").asText(null));
                 medicine.setDosage(medicineNode.path("Dosage").asText(null));
                 medicine.setFrequency(medicineNode.path("Frequency").asText(null));
                 medicine.setDuration(medicineNode.path("Duration_to_take_med").asText(null));
                 medicine.setQuantity(medicineNode.path("Quantity").asText(null));
-
-                // RxNorm normalization data
                 medicine.setRxcui(medicineNode.path("rxcui").asText(null));
                 medicine.setNormalizedName(medicineNode.path("normalized_name").asText(null));
+                medicine.setNormalizationMethod(medicineNode.path("normalization_method").asText(null));
 
-                // ✅ NEW: Store normalization method
-                String method = medicineNode.path("normalization_method").asText(null);
-                medicine.setNormalizationMethod(method);
+                String normStatus = medicineNode.path("normalization_status").asText(null);
+                medicine.setNormalizationStatus(normStatus != null ? normStatus.toUpperCase() : "COMPLETED");
 
-                // Normalization status
-                String normalizationStatus = medicineNode.path("normalization_status").asText(null);
-                medicine.setNormalizationStatus(normalizationStatus != null ? normalizationStatus.toUpperCase() : "COMPLETED");
-
-
-                // Confidence
                 if (medicineNode.has("normalization_confidence") && !medicineNode.get("normalization_confidence").isNull()) {
                     medicine.setNormalizationConfidence(
                             BigDecimal.valueOf(medicineNode.path("normalization_confidence").asDouble())
                     );
                 }
 
-                // ✅ NEW: Store RxNorm alternatives as JSON
                 if (medicineNode.has("alternatives") && medicineNode.get("alternatives").isArray()) {
                     medicine.setRxnormAlternatives(medicineNode.get("alternatives").toString());
                 }
@@ -276,7 +264,50 @@ public class PrescriptionService {
 
         } catch (Exception e) {
             System.err.println("Error saving medicines: " + e.getMessage());
-            e.printStackTrace();
+        }
+    }
+
+    // =========================================================================
+    // Save drug interactions to app_schema.drug_interactions
+    // Phase 4 output is flat: {drug1_name, drug1_rxcui, drug2_name, drug2_rxcui,
+    //                          severity, description, source}
+    // =========================================================================
+
+
+
+
+    private void saveDuplicateWarningsFromAIResult(Prescription prescription, JsonNode resultNode) {
+        try {
+            if (!resultNode.has("duplicate_ingredient_warnings")
+                    || !resultNode.get("duplicate_ingredient_warnings").isArray()) {
+                System.out.println("No duplicate ingredient warnings found");
+                return;
+            }
+
+            JsonNode warningsArray = resultNode.get("duplicate_ingredient_warnings");
+            if (warningsArray.isEmpty()) return;
+
+            int count = 0;
+            for (JsonNode n : warningsArray) {
+                List<String> names = new ArrayList<>();
+                if (n.has("medicines") && n.get("medicines").isArray()) {
+                    n.get("medicines").forEach(m -> names.add(m.asText()));
+                }
+
+                DuplicateIngredientWarningEntity entity = DuplicateIngredientWarningEntity.builder()
+                        .prescription(prescription)
+                        .rxcui(n.path("rxcui").asText(null))
+                        .message(n.path("message").asText(null))
+                        .medicineNames(String.join(",", names))
+                        .build();
+
+                duplicateWarningRepository.save(entity);
+                count++;
+            }
+            System.out.println("Saved " + count + " duplicate ingredient warnings");
+
+        } catch (Exception e) {
+            System.err.println("Error saving duplicate warnings: " + e.getMessage());
         }
     }
 
@@ -288,34 +319,22 @@ public class PrescriptionService {
             }
 
             JsonNode interactions = resultNode.get("drug_interactions");
-            if (!interactions.isArray()) {
-                System.out.println("Drug interactions field is not an array");
-                return;
-            }
+            if (!interactions.isArray()) return;
 
             int count = 0;
             for (JsonNode interactionNode : interactions) {
                 DrugInteraction interaction = new DrugInteraction();
                 interaction.setPrescription(prescription);
-
-                // Drug 1
-                if (interactionNode.has("drug1") && !interactionNode.get("drug1").isNull()) {
-                    JsonNode drug1 = interactionNode.get("drug1");
-                    interaction.setDrug1Rxcui(drug1.path("rxcui").asText(null));
-                    interaction.setDrug1Name(drug1.path("name").asText(null));
-                }
-
-                // Drug 2
-                if (interactionNode.has("drug2") && !interactionNode.get("drug2").isNull()) {
-                    JsonNode drug2 = interactionNode.get("drug2");
-                    interaction.setDrug2Rxcui(drug2.path("rxcui").asText(null));
-                    interaction.setDrug2Name(drug2.path("name").asText(null));
-                }
-
+                interaction.setDrug1Rxcui(interactionNode.path("drug1_rxcui").asText(null));
+                interaction.setDrug1Name(interactionNode.path("drug1_name").asText(null));
+                interaction.setDrug2Rxcui(interactionNode.path("drug2_rxcui").asText(null));
+                interaction.setDrug2Name(interactionNode.path("drug2_name").asText(null));
                 interaction.setSeverity(interactionNode.path("severity").asText(null));
                 interaction.setDescription(interactionNode.path("description").asText(null));
+                interaction.setSource(interactionNode.path("source").asText("DRUGBANK"));
 
-                interactionRepository.save(interaction);
+                // Saves to app_schema.drug_interactions (DrugInteraction entity)
+                drugInteractionRepository.save(interaction);
                 count++;
             }
 
@@ -323,28 +342,29 @@ public class PrescriptionService {
 
         } catch (Exception e) {
             System.err.println("Error saving drug interactions: " + e.getMessage());
-            e.printStackTrace();
         }
     }
+
+    // =========================================================================
+    // Read queries
+    // =========================================================================
 
     @Transactional(readOnly = true)
     public List<PrescriptionResponse> getPatientPrescriptions(Long patientId) {
         List<Prescription> prescriptions = prescriptionRepository.findByPatient_PatientIdWithDetails(patientId);
         return prescriptions.stream()
-                .map(this::buildPrescriptionResponse)
+                .map(p -> buildPrescriptionResponse(p, null))
                 .collect(Collectors.toList());
     }
 
     @Transactional(readOnly = true)
     public List<PrescriptionResponse> getDoctorPatientPrescriptions(Long doctorId, Long patientId) {
-        // Check access
         if (!patientService.hasAccessToPatient(doctorId, patientId)) {
             throw new RuntimeException("Doctor does not have access to this patient's records");
         }
-
         List<Prescription> prescriptions = prescriptionRepository.findByPatient_PatientIdWithDetails(patientId);
         return prescriptions.stream()
-                .map(this::buildPrescriptionResponse)
+                .map(p -> buildPrescriptionResponse(p, null))
                 .collect(Collectors.toList());
     }
 
@@ -353,7 +373,6 @@ public class PrescriptionService {
         Prescription prescription = prescriptionRepository.findByIdWithDetails(prescriptionId)
                 .orElseThrow(() -> new RuntimeException("Prescription not found"));
 
-        // Access control
         if ("PATIENT".equals(role)) {
             Patient patient = patientService.getPatientByUserId(requestingUserId);
             if (!prescription.getPatient().getPatientId().equals(patient.getPatientId())) {
@@ -362,160 +381,202 @@ public class PrescriptionService {
         } else if ("DOCTOR".equals(role)) {
             Doctor doctor = doctorRepository.findByUser_UserId(requestingUserId)
                     .orElseThrow(() -> new RuntimeException("Doctor not found"));
-            if (!patientService.hasAccessToPatient(doctor.getDoctorId(), prescription.getPatient().getPatientId())) {
+            if (!patientService.hasAccessToPatient(doctor.getDoctorId(),
+                    prescription.getPatient().getPatientId())) {
                 throw new RuntimeException("Access denied");
             }
         }
 
-        return buildPrescriptionResponse(prescription);
+        return buildPrescriptionResponse(prescription, null);
     }
 
-    private PrescriptionResponse buildPrescriptionResponse(Prescription prescription) {
-        PrescriptionResponse response = new PrescriptionResponse();
-        response.setPrescriptionId(prescription.getPrescriptionId());
-        response.setPrescriptionType(prescription.getPrescriptionType().name());
-        response.setPrescriptionDate(prescription.getPrescriptionDate());
-        response.setDiagnosis(prescription.getDiagnosis());
-        response.setPatientHistory(prescription.getPatientHistory());
-        response.setWeight(prescription.getWeight());
-        response.setTemperature(prescription.getTemperature());
-        response.setBloodPressure(prescription.getBloodPressure());
-        response.setProcessingStatus(prescription.getProcessingStatus());
-        response.setCreatedAt(prescription.getCreatedAt());
-        response.setImagePath(prescription.getImagePath());
 
-        // Patient info
+
+
+    // =========================================================================
+    // Build response
+    // =========================================================================
+
+    private PrescriptionResponse buildPrescriptionResponse(Prescription prescription, JsonNode resultNode) {
+
+        PrescriptionResponse response = PrescriptionResponse.builder()
+                .prescriptionId(prescription.getPrescriptionId())
+                .status(prescription.getProcessingStatus())
+                .createdAt(prescription.getCreatedAt())
+                .build();
+
         Patient patient = prescription.getPatient();
         if (patient != null) {
-            response.setPatientInfo(new PrescriptionResponse.PatientInfo(
-                    patient.getPatientId(),
-                    patient.getPatientUniqueId(),
-                    patient.getPatientName(),
-                    patient.getAge(),
-                    patient.getGender()
-            ));
+            response.setPatientName(patient.getPatientName());
         }
 
-        // Doctor info
-        if (prescription.getDoctor() != null) {
-            Doctor doctor = prescription.getDoctor();
-            if (doctor.getUser() != null) {
-                response.setDoctorInfo(new PrescriptionResponse.DoctorInfo(
-                        doctor.getDoctorId(),
-                        doctor.getDoctorUniqueId(),
-                        doctor.getUser().getFullName(),
-                        doctor.getSpecialization()
-                ));
-            }
+        if (prescription.getDoctor() != null && prescription.getDoctor().getUser() != null) {
+            response.setDoctorName(prescription.getDoctor().getUser().getFullName());
         }
 
-        // ✅ UPDATED: Medicines with full RxNorm details
-        List<PrescriptionMedicine> medicines = medicineRepository.findByPrescription_PrescriptionId(prescription.getPrescriptionId());
-        if (medicines != null && !medicines.isEmpty()) {
-            response.setMedicines(medicines.stream()
-                    .map(med -> {
-                        PrescriptionResponse.MedicineInfo info = new PrescriptionResponse.MedicineInfo(
-                                med.getMedicineId(),
-                                med.getMedicineName(),
-                                med.getMedicineType(),
-                                med.getDosage(),
-                                med.getFrequency(),
-                                med.getDuration(),
-                                med.getQuantity(),
-                                med.getRxcui(),
-                                med.getNormalizedName(),
-                                med.getNormalizationStatus(),
-                                med.getNormalizationConfidence() != null ?
-                                        med.getNormalizationConfidence().doubleValue() : null,
-                                med.getNormalizationMethod(),
-                                parseRxNormAlternatives(med.getRxnormAlternatives())
-                        );
-                        return info;
-                    })
-                    .collect(Collectors.toList()));
-        } else {
-            response.setMedicines(new ArrayList<>());
-        }
+        response.setImageUrl(prescription.getImagePath());
 
-        // In buildPrescriptionResponse, before return response:
-        List<DrugInteraction> interactions = interactionRepository
+        // ── Medicines ────────────────────────────────────────────────────────
+        List<PrescriptionMedicine> medicines = medicineRepository
                 .findByPrescription_PrescriptionId(prescription.getPrescriptionId());
-        if (interactions != null && !interactions.isEmpty()) {
-            response.setInteractions(interactions.stream()
-                    .map(i -> new PrescriptionResponse.InteractionInfo(
-                            i.getDrug1Name(),
-                            i.getDrug2Name(),
-                            i.getSeverity(),
-                            i.getDescription()
-                    ))
-                    .collect(Collectors.toList()));
-        }
 
-        // ... rest of the method
-        return response;
-    }
+        response.setMedicines(medicines != null && !medicines.isEmpty()
+                ? medicines.stream()
+                .map(med -> PrescriptionResponse.MedicineResult.builder()
+                        .originalName(med.getMedicineName())
+                        .normalizedName(med.getNormalizedName())
+                        .rxcui(med.getRxcui())
+                        .medicineType(med.getMedicineType())
+                        .dosage(med.getDosage())
+                        .frequency(med.getFrequency())
+                        .duration(med.getDuration())
+                        .quantity(med.getQuantity())
+                        .confidence(med.getNormalizationConfidence() != null
+                                ? med.getNormalizationConfidence().doubleValue() : 0.0)
+                        .method(med.getNormalizationMethod())
+                        .status(med.getNormalizationStatus())
+                        .build())
+                .collect(Collectors.toList())
+                : new ArrayList<>());
 
-    /**
-     * Parse RxNorm alternatives from JSON string
-     */
-    private List<PrescriptionResponse.RxNormAlternative> parseRxNormAlternatives(String alternativesJson) {
-        if (alternativesJson == null || alternativesJson.isEmpty()) {
-            return new ArrayList<>();
-        }
+        // ── Drug interactions + disease warnings ─────────────────────────────
+        List<PrescriptionResponse.DrugInteractionResult> ddiResults     = new ArrayList<>();
+        List<PrescriptionResponse.DrugDiseaseWarning>    diseaseWarnings = new ArrayList<>();
+        List<PrescriptionResponse.DuplicateIngredientWarning> duplicateWarnings = new ArrayList<>();
+        int highCount     = 0;
+        int moderateCount = 0;
 
-        try {
-            JsonNode alternatives = objectMapper.readTree(alternativesJson);
-            List<PrescriptionResponse.RxNormAlternative> result = new ArrayList<>();
+        // ── Duplicate ingredient warnings ────────────────────────────────────
 
-            if (alternatives.isArray()) {
-                for (JsonNode alt : alternatives) {
-                    result.add(new PrescriptionResponse.RxNormAlternative(
-                            alt.path("rxcui").asText(null),
-                            alt.path("name").asText(null),
-                            alt.path("tty").asText(null),
-                            alt.has("similarity") ? alt.path("similarity").asDouble() : null
-                    ));
+        if (resultNode != null) {
+            // Fresh pipeline run — read directly from FastAPI response JSON
+            if (resultNode.has("drug_interactions") && resultNode.get("drug_interactions").isArray()) {
+                for (JsonNode n : resultNode.get("drug_interactions")) {
+                    String severity = n.path("severity").asText("UNKNOWN");
+                    ddiResults.add(PrescriptionResponse.DrugInteractionResult.builder()
+                            .drug1Name(n.path("drug1_name").asText(null))
+                            .drug1Rxcui(n.path("drug1_rxcui").asText(null))
+                            .drug2Name(n.path("drug2_name").asText(null))
+                            .drug2Rxcui(n.path("drug2_rxcui").asText(null))
+                            .severity(severity)
+                            .description(n.path("description").asText(null))
+                            .source(n.path("source").asText("DRUGBANK"))
+                            .build());
+                    if ("HIGH".equals(severity))     highCount++;
+                    if ("MODERATE".equals(severity)) moderateCount++;
                 }
             }
 
-            return result;
-        } catch (Exception e) {
-            System.err.println("Error parsing RxNorm alternatives: " + e.getMessage());
-            return new ArrayList<>();
+            if (resultNode.has("drug_disease_warnings") && resultNode.get("drug_disease_warnings").isArray()) {
+                for (JsonNode n : resultNode.get("drug_disease_warnings")) {
+                    List<String> meshTerms = new ArrayList<>();
+                    if (n.has("mesh_terms") && n.get("mesh_terms").isArray()) {
+                        n.get("mesh_terms").forEach(t -> meshTerms.add(t.asText()));
+                    }
+                    diseaseWarnings.add(PrescriptionResponse.DrugDiseaseWarning.builder()
+                            .drugName(n.path("drug_name").asText(null))
+                            .rxcui(n.path("rxcui").asText(null))
+                            .indicationText(n.path("indication_text").asText(null))
+                            .meshTerms(meshTerms)
+                            .build());
+                }
+            }
+
+            // ── NEW: duplicate ingredient warnings ───────────────────────────
+            // ── NEW: duplicate ingredient warnings ───────────────────────────
+            if (resultNode.has("duplicate_ingredient_warnings")
+                    && resultNode.get("duplicate_ingredient_warnings").isArray()) {
+                for (JsonNode n : resultNode.get("duplicate_ingredient_warnings")) {
+                    List<String> duplicateMedicineNames = new ArrayList<>();
+                    if (n.has("medicines") && n.get("medicines").isArray()) {
+                        n.get("medicines").forEach(m -> duplicateMedicineNames.add(m.asText()));
+                    }
+                    duplicateWarnings.add(PrescriptionResponse.DuplicateIngredientWarning.builder()
+                            .rxcui(n.path("rxcui").asText(null))
+                            .medicines(duplicateMedicineNames)
+                            .message(n.path("message").asText(null))
+                            .build());
+                }
+            }
+            // ─────────────────────────────────────────────────────────────────
+
+        } else {
+            // Historical fetch — saved rows from app_schema
+            List<DrugInteraction> savedInteractions = drugInteractionRepository
+                    .findByPrescription_PrescriptionId(prescription.getPrescriptionId());
+            if (savedInteractions != null) {
+                for (DrugInteraction i : savedInteractions) {
+                    String severity = i.getSeverity() != null ? i.getSeverity() : "UNKNOWN";
+                    ddiResults.add(PrescriptionResponse.DrugInteractionResult.builder()
+                            .drug1Name(i.getDrug1Name())
+                            .drug1Rxcui(i.getDrug1Rxcui())
+                            .drug2Name(i.getDrug2Name())
+                            .drug2Rxcui(i.getDrug2Rxcui())
+                            .severity(severity)
+                            .description(i.getDescription())
+                            .source(i.getSource() != null ? i.getSource() : "DRUGBANK")
+                            .build());
+                    if ("HIGH".equals(severity))     highCount++;
+                    if ("MODERATE".equals(severity)) moderateCount++;
+                }
+            }
+            // duplicateWarnings stays empty ArrayList — not persisted, only fresh run
+            // ── NEW: read persisted duplicate warnings ────────────────────────
+            List<DuplicateIngredientWarningEntity> savedDuplicates = duplicateWarningRepository
+                    .findByPrescription_PrescriptionId(prescription.getPrescriptionId());
+            if (savedDuplicates != null) {
+                for (DuplicateIngredientWarningEntity d : savedDuplicates) {
+                    List<String> names = (d.getMedicineNames() != null && !d.getMedicineNames().isEmpty())
+                            ? List.of(d.getMedicineNames().split(","))
+                            : new ArrayList<>();
+                    duplicateWarnings.add(PrescriptionResponse.DuplicateIngredientWarning.builder()
+                            .rxcui(d.getRxcui())
+                            .medicines(names)
+                            .message(d.getMessage())
+                            .build());
+                }
+            }
         }
+
+        response.setDrugInteractions(ddiResults);
+        response.setDrugDiseaseWarnings(diseaseWarnings);
+        response.setDuplicateIngredientWarnings(duplicateWarnings);  // ← NEW
+        response.setHighSeverityCount(highCount);
+        response.setModerateSeverityCount(moderateCount);
+
+        return response;
     }
+
+    // =========================================================================
+    // Create digital prescription (doctor-entered, no OCR)
+    // =========================================================================
 
     @Transactional
     public PrescriptionResponse createDigitalPrescription(Long doctorId, CreatePrescriptionRequest request) {
         try {
-            // Verify doctor has access to patient
             if (!patientService.hasAccessToPatient(doctorId, request.getPatientId())) {
                 throw new RuntimeException("You do not have access to this patient's records");
             }
 
-            // Get doctor and patient
             Doctor doctor = doctorRepository.findById(doctorId)
                     .orElseThrow(() -> new RuntimeException("Doctor not found"));
             Patient patient = patientRepository.findById(request.getPatientId())
                     .orElseThrow(() -> new RuntimeException("Patient not found"));
 
-            // Create prescription
             Prescription prescription = new Prescription();
             prescription.setDoctor(doctor);
             prescription.setPatient(patient);
             prescription.setPrescriptionType(Prescription.PrescriptionType.DIGITAL);
-            prescription.setPrescriptionDate(request.getPrescriptionDate() != null ?
-                    request.getPrescriptionDate() : LocalDate.now());
+            prescription.setPrescriptionDate(request.getPrescriptionDate() != null
+                    ? request.getPrescriptionDate() : LocalDate.now());
             prescription.setDiagnosis(request.getDiagnosis());
             prescription.setPatientHistory(request.getPatientHistory());
             prescription.setWeight(request.getWeight());
             prescription.setTemperature(request.getTemperature());
             prescription.setBloodPressure(request.getBloodPressure());
             prescription.setProcessingStatus("COMPLETED");
-
             prescription = prescriptionRepository.save(prescription);
 
-            // Save medicines
             if (request.getMedicines() != null && !request.getMedicines().isEmpty()) {
                 for (CreatePrescriptionRequest.MedicineRequest medReq : request.getMedicines()) {
                     PrescriptionMedicine medicine = new PrescriptionMedicine();
@@ -526,22 +587,17 @@ public class PrescriptionService {
                     medicine.setFrequency(medReq.getFrequency());
                     medicine.setDuration(medReq.getDuration());
                     medicine.setQuantity(medReq.getQuantity());
-                    medicine.setNormalizationStatus("MANUAL"); // No RxNorm for digital prescriptions
-
+                    medicine.setNormalizationStatus("MANUAL");
                     medicineRepository.save(medicine);
                 }
             }
 
-            System.out.println("Digital prescription created successfully: " + prescription.getPrescriptionId());
-
-            // Build and return response
-            return buildPrescriptionResponse(prescription);
+            System.out.println("Digital prescription created: " + prescription.getPrescriptionId());
+            return buildPrescriptionResponse(prescription, null);
 
         } catch (Exception e) {
             System.err.println("Error creating digital prescription: " + e.getMessage());
-            e.printStackTrace();
             throw new RuntimeException("Failed to create prescription: " + e.getMessage(), e);
         }
     }
-
 }

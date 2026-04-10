@@ -21,6 +21,8 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
     Optional<User> findByRegistrationToken(String token);
 
+    List<User> findAllByOrderByLastLoginDesc();
+
     @Query("SELECT u FROM User u WHERE u.accountStatus = 'PENDING' ORDER BY u.createdAt DESC")
     List<User> findPendingRegistrations();
 
