@@ -4,7 +4,7 @@ import com.prescription.dto.ApiResponse;
 import com.prescription.dto.UserDTO;
 import com.prescription.dto.CreateAdminUserRequest;
 import com.prescription.service.UserService;
-import com.prescription.security.CustomUserDetails;
+import com.prescription.security.JwtPrincipal;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -70,7 +70,7 @@ public class AdminController {
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponse<UserDTO>> createAdminUser(
             @RequestBody CreateAdminUserRequest request,
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             UserDTO user = userService.createAdminOrAnalyst(
                     request,

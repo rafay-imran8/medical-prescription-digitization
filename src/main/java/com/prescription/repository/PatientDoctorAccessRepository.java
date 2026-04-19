@@ -13,6 +13,10 @@ import java.util.Optional;
 @Repository
 public interface PatientDoctorAccessRepository extends JpaRepository<PatientDoctorAccess, Long> {
 
+    // =========================================================
+    // BASIC LOOKUPS
+    // =========================================================
+
     Optional<PatientDoctorAccess> findByPatient_PatientIdAndDoctor_DoctorId(
             Long patientId,
             Long doctorId
@@ -24,16 +28,9 @@ public interface PatientDoctorAccessRepository extends JpaRepository<PatientDoct
             LocalDateTime now
     );
 
-    @Query("""
-        SELECT pda FROM PatientDoctorAccess pda
-        JOIN FETCH pda.patient p
-        JOIN FETCH p.user
-        WHERE pda.doctor.doctorId = :doctorId
-        AND pda.accessGranted = true
-    """)
-    List<PatientDoctorAccess> findByDoctor_DoctorIdAndAccessGrantedTrueWithDetails(
-            @Param("doctorId") Long doctorId
-    );
+    // =========================================================
+    // PENDING REQUESTS (Patient sees who requested access)
+    // =========================================================
 
     @Query("""
         SELECT pda FROM PatientDoctorAccess pda
@@ -41,10 +38,15 @@ public interface PatientDoctorAccessRepository extends JpaRepository<PatientDoct
         JOIN FETCH d.user
         WHERE pda.patient.patientId = :patientId
         AND pda.accessGranted = false
+        AND pda.isActive = false
     """)
     List<PatientDoctorAccess> findPendingRequestsByPatientId(
             @Param("patientId") Long patientId
     );
+
+    // =========================================================
+    // ACTIVE ACCESS CHECK (SECURITY CRITICAL)
+    // =========================================================
 
     @Query("""
         SELECT pda FROM PatientDoctorAccess pda
@@ -59,11 +61,31 @@ public interface PatientDoctorAccessRepository extends JpaRepository<PatientDoct
             @Param("doctorId") Long doctorId
     );
 
+    // =========================================================
+    // DOCTOR → GET ALL ACTIVE PATIENTS (BEST METHOD ✅)
+    // =========================================================
+
     @Query("""
-    SELECT pda FROM PatientDoctorAccess pda
-    WHERE pda.patient.patientId = :patientId
-    AND pda.accessGranted = true
-""")
+        SELECT pda FROM PatientDoctorAccess pda
+        JOIN FETCH pda.patient p
+        WHERE pda.doctor.doctorId = :doctorId
+        AND pda.accessGranted = true
+        AND pda.isActive = true
+        AND pda.accessExpiresAt > CURRENT_TIMESTAMP
+    """)
+    List<PatientDoctorAccess> findActiveGrantedAccessWithPatient(
+            @Param("doctorId") Long doctorId
+    );
+
+    // =========================================================
+    // (OPTIONAL) HISTORICAL / NON-FILTERED ACCESS
+    // =========================================================
+
+    @Query("""
+        SELECT pda FROM PatientDoctorAccess pda
+        WHERE pda.patient.patientId = :patientId
+        AND pda.accessGranted = true
+    """)
     List<PatientDoctorAccess> findByPatient_PatientIdAndAccessGrantedTrue(
             @Param("patientId") Long patientId
     );

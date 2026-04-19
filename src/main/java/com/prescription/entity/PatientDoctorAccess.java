@@ -44,10 +44,7 @@ public class PatientDoctorAccess {
     private LocalDateTime accessExpiresAt;
 
     @Column(name = "is_active", nullable = false)
-    private Boolean isActive = true;
-
-    @Column(name = "requested_at")  // ← ADD THIS
-    private LocalDateTime requestedAt;
+    private Boolean isActive = false;
 
     @Column(name = "access_code", length = 10)  // ← ADD THIS
     private String accessCode;

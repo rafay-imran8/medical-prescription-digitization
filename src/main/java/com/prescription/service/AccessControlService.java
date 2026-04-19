@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Service
@@ -53,6 +54,7 @@ public class AccessControlService {
     /**
      * Doctor requests access to patient
      */
+
     @Transactional
     public void requestAccess(Long doctorId, Long patientId) {
         Doctor doctor = doctorRepository.findById(doctorId)
@@ -61,22 +63,36 @@ public class AccessControlService {
         Patient patient = patientRepository.findById(patientId)
                 .orElseThrow(() -> new RuntimeException("Patient not found"));
 
-        // Check if request already exists
-        if (accessRepository.findByPatient_PatientIdAndDoctor_DoctorId(patientId, doctorId).isPresent()) {
-            throw new RuntimeException("Access request already exists");
-        }
+        Optional<PatientDoctorAccess> existing =
+                accessRepository.findByPatient_PatientIdAndDoctor_DoctorId(patientId, doctorId);
 
-        // Create new access request
-        PatientDoctorAccess access = new PatientDoctorAccess();
-        access.setDoctor(doctor);
-        access.setPatient(patient);
-        access.setAccessGranted(false);
-        access.setIsActive(false);
-        access.setRequestedAt(LocalDateTime.now());
+        PatientDoctorAccess access;
+
+        if (existing.isPresent()) {
+            access = existing.get();
+
+            // If already active or already granted, do not overwrite it
+            if (Boolean.TRUE.equals(access.getIsActive()) || Boolean.TRUE.equals(access.getAccessGranted())) {
+                throw new RuntimeException("Access request already exists");
+            }
+
+            // Reuse old inactive record
+            access.setAccessGranted(false);
+            access.setIsActive(false);
+            access.setAccessCode(null);
+            access.setCodeExpiresAt(null);
+            access.setAccessGrantedAt(null);
+            access.setAccessExpiresAt(null);
+        } else {
+            access = new PatientDoctorAccess();
+            access.setDoctor(doctor);
+            access.setPatient(patient);
+            access.setAccessGranted(false);
+            access.setIsActive(false);
+        }
 
         accessRepository.save(access);
 
-        // Send email notification to patient
         emailService.sendAccessRequestEmail(
                 patient.getEmail(),
                 patient.getPatientName(),
@@ -84,59 +100,81 @@ public class AccessControlService {
                 doctor.getSpecialization()
         );
     }
-
     /**
      * Patient grants access - generates code and sends email to patient
      */
+
     @Transactional
     public String grantAccessWithCode(Long patientId, Long doctorId) {
+
         PatientDoctorAccess access = accessRepository
                 .findByPatient_PatientIdAndDoctor_DoctorId(patientId, doctorId)
                 .orElseThrow(() -> new RuntimeException("Access request not found"));
 
-        // Generate access code
-        String accessCode = generateAccessCode();
+        // Prevent re-grant if already active
+        if (Boolean.TRUE.equals(access.getIsActive())) {
+            throw new RuntimeException("Access already active");
+        }
 
-        access.setAccessCode(accessCode);
-        access.setCodeExpiresAt(LocalDateTime.now().plusHours(1)); // Code valid for 1 hour
+        String code = generateAccessCode();
+
+        access.setAccessCode(code);
+        access.setCodeExpiresAt(LocalDateTime.now().plusHours(1)); // 1 hour
         access.setAccessGranted(true);
         access.setAccessGrantedAt(LocalDateTime.now());
-        access.setAccessExpiresAt(LocalDateTime.now().plusHours(24)); // Access valid for 24 hours
+        access.setAccessExpiresAt(LocalDateTime.now().plusHours(24)); // 24 hours
+        access.setIsActive(false); // IMPORTANT
 
         accessRepository.save(access);
 
-        // Send email with access code to patient
-        Patient patient = access.getPatient();
-        Doctor doctor = access.getDoctor();
-
         emailService.sendAccessCodeEmail(
-                patient.getEmail(),
-                patient.getPatientName(),
-                doctor.getUser().getFullName(),
-                accessCode
+                access.getPatient().getEmail(),
+                access.getPatient().getPatientName(),
+                access.getDoctor().getUser().getFullName(),
+                code
         );
 
-        return accessCode;
+        return code;
     }
-
     /**
      * Patient enters code to activate access
      */
     @Transactional
     public void activateAccessWithCode(String accessCode) {
+
         PatientDoctorAccess access = accessRepository.findByAccessCode(accessCode)
                 .orElseThrow(() -> new RuntimeException("Invalid access code"));
 
-        // Check if code expired
+        // 1. Check if code exists
+        if (access.getCodeExpiresAt() == null) {
+            throw new RuntimeException("Code already used or invalid");
+        }
+
+        // 2. Check expiry (1 hour)
         if (access.getCodeExpiresAt().isBefore(LocalDateTime.now())) {
             throw new RuntimeException("Access code has expired");
         }
 
-        // Activate access
+        // 3. Ensure patient actually approved
+        if (!Boolean.TRUE.equals(access.getAccessGranted())) {
+            throw new RuntimeException("Access not approved by patient");
+        }
+
+        // 4. Prevent reuse
+        if (Boolean.TRUE.equals(access.getIsActive())) {
+            throw new RuntimeException("Access already activated");
+        }
+
+        // 5. Activate access (24h validity already set earlier)
         access.setIsActive(true);
+
+        // 6. Invalidate code immediately (one-time use)
+        access.setAccessCode(null);
+        access.setCodeExpiresAt(null);
+
         accessRepository.save(access);
 
-        // Send confirmation email to doctor
+        // 7. Notify doctor
         Doctor doctor = access.getDoctor();
         Patient patient = access.getPatient();
 
@@ -170,7 +208,8 @@ public class AccessControlService {
                     dto.setEmail(doctor.getUser().getEmail());
                     dto.setAccessRequested(true);
                     dto.setAccessGranted(false);
-                    dto.setAccessRequestedAt(access.getRequestedAt());
+//
+                    dto.setAccessRequestedAt(access.getAccessRequestedAt());
                     return dto;
                 })
                 .collect(Collectors.toList());
@@ -179,66 +218,61 @@ public class AccessControlService {
     /**
      * Get doctors who have been granted access
      */
+//    @Transactional(readOnly = true)
+//    public List<DoctorDTO> getGrantedDoctors(Long patientId) {
+//        List<PatientDoctorAccess> granted = accessRepository
+//                .findByPatient_PatientIdAndAccessGrantedTrue(patientId);
+//
+//        return granted.stream()
+//                .map(access -> {
+//                    Doctor doctor = access.getDoctor();
+//                    DoctorDTO dto = new DoctorDTO();
+//                    dto.setDoctorId(doctor.getDoctorId());
+//                    dto.setDoctorUniqueId(doctor.getDoctorUniqueId());
+//                    dto.setFullName(doctor.getUser().getFullName());  // ← Changed
+//                    dto.setSpecialization(doctor.getSpecialization());
+//                    dto.setLicenseNumber(doctor.getLicenseNumber());
+//                    dto.setPhone(doctor.getContactNumber());  // ← Changed
+//                    dto.setEmail(doctor.getUser().getEmail());
+//                    dto.setAccessRequested(true);
+//                    dto.setAccessGranted(true);
+//                    dto.setAccessRequestedAt(access.getAccessRequestedAt());
+//                    return dto;
+//                })
+//                .collect(Collectors.toList());
+//    }
+
     @Transactional(readOnly = true)
     public List<DoctorDTO> getGrantedDoctors(Long patientId) {
-        List<PatientDoctorAccess> granted = accessRepository
-                .findByPatient_PatientIdAndAccessGrantedTrue(patientId);
+        List<PatientDoctorAccess> granted =
+                accessRepository.findByPatient_PatientIdAndAccessGrantedTrue(patientId);
 
         return granted.stream()
+                .filter(a -> Boolean.TRUE.equals(a.getIsActive()))
+                .filter(a -> a.getAccessExpiresAt() != null && a.getAccessExpiresAt().isAfter(LocalDateTime.now()))
                 .map(access -> {
                     Doctor doctor = access.getDoctor();
                     DoctorDTO dto = new DoctorDTO();
                     dto.setDoctorId(doctor.getDoctorId());
                     dto.setDoctorUniqueId(doctor.getDoctorUniqueId());
-                    dto.setFullName(doctor.getUser().getFullName());  // ← Changed
+                    dto.setFullName(doctor.getUser().getFullName());
                     dto.setSpecialization(doctor.getSpecialization());
                     dto.setLicenseNumber(doctor.getLicenseNumber());
-                    dto.setPhone(doctor.getContactNumber());  // ← Changed
+                    dto.setPhone(doctor.getContactNumber());
                     dto.setEmail(doctor.getUser().getEmail());
                     dto.setAccessRequested(true);
                     dto.setAccessGranted(true);
-                    dto.setAccessRequestedAt(access.getRequestedAt());
+                    dto.setAccessRequestedAt(access.getAccessRequestedAt());
                     return dto;
                 })
                 .collect(Collectors.toList());
     }
 
-    /**
-     * Grant access via token (legacy method - can be removed if not used)
-     */
-    @Transactional
-    public void grantAccessViaToken(String token) {
-        // If you're not using this method, you can remove the endpoint
-        throw new RuntimeException("This method is deprecated. Use grantAccessWithCode instead.");
-    }
-
-    /**
-     * Grant access manually (without code system)
-     */
-    @Transactional
-    public void grantAccessManually(Long patientId, Long doctorId) {
-        PatientDoctorAccess access = accessRepository
-                .findByPatient_PatientIdAndDoctor_DoctorId(patientId, doctorId)
-                .orElseThrow(() -> new RuntimeException("Access request not found"));
-
-        access.setAccessGranted(true);
-        access.setAccessGrantedAt(LocalDateTime.now());
-        access.setIsActive(true);
-        access.setAccessExpiresAt(LocalDateTime.now().plusHours(24));
-
-        accessRepository.save(access);
-
-        // Send email notification
-        emailService.sendAccessGrantedEmail(
-                access.getDoctor().getUser().getEmail(),
-                access.getDoctor().getUser().getFullName(),
-                access.getPatient().getPatientName()
-        );
-    }
 
     /**
      * Revoke access
      */
+
     @Transactional
     public void revokeAccess(Long patientId, Long doctorId) {
         PatientDoctorAccess access = accessRepository
@@ -247,16 +281,18 @@ public class AccessControlService {
 
         access.setIsActive(false);
         access.setAccessGranted(false);
+        access.setAccessCode(null);
+        access.setCodeExpiresAt(null);
 
         accessRepository.save(access);
 
-        // Notify doctor
         emailService.sendAccessRevokedEmail(
                 access.getDoctor().getUser().getEmail(),
                 access.getDoctor().getUser().getFullName(),
                 access.getPatient().getPatientName()
         );
     }
+
     /**
      * Check and revoke expired access (run this as scheduled task)
      */
@@ -267,9 +303,12 @@ public class AccessControlService {
 
         for (PatientDoctorAccess access : expiredAccess) {
             access.setIsActive(false);
+            access.setAccessGranted(false);
+            access.setAccessCode(null);
+            access.setCodeExpiresAt(null);
+
             accessRepository.save(access);
 
-            // Notify doctor that access has expired
             emailService.sendAccessExpiredEmail(
                     access.getDoctor().getUser().getEmail(),
                     access.getDoctor().getUser().getFullName(),

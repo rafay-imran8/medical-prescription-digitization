@@ -127,14 +127,14 @@ public class UserService {
      */
     @Transactional(readOnly = true)
     public List<UserDTO> getAllUsersDTO() {
-        List<User> users = userRepository.findAll();
+        List<User> users = userRepository.findAllWithDetails();
         return users.stream()
                 .map(this::convertToDTO)
                 .collect(Collectors.toList());
     }
 
     public List<UserLogResponse> getUserLogs() {
-        return userRepository.findAllByOrderByLastLoginDesc()
+        return userRepository.findAllWithDetails()
                 .stream()
                 .map(this::toLogResponse)
                 .collect(Collectors.toList());

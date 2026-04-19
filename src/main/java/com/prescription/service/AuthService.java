@@ -223,45 +223,36 @@ public class AuthService {
     /**
      * Login with account status check
      */
-    @Transactional
+    // AuthService.java
+// Remove @Transactional from login method, and make lastLogin update separate
     public LoginResponse login(LoginRequest request) {
         User user = userRepository.findByEmail(request.getEmail())
                 .orElseThrow(() -> new RuntimeException("Invalid email or password"));
 
-        // Check account status
         if (user.getAccountStatus() == User.AccountStatus.PENDING) {
-            throw new RuntimeException("Your account is pending approval. Please wait for admin verification.");
+            throw new RuntimeException("Your account is pending approval.");
         }
-
         if (user.getAccountStatus() == User.AccountStatus.REJECTED) {
-            throw new RuntimeException("Your registration was rejected. Please contact support for details.");
+            throw new RuntimeException("Your registration was rejected.");
         }
-
         if (user.getAccountStatus() == User.AccountStatus.SUSPENDED) {
-            throw new RuntimeException("Your account has been suspended. Please contact support.");
+            throw new RuntimeException("Your account has been suspended.");
         }
-
         if (!user.getPasswordSet()) {
             throw new RuntimeException("Please set your password using the link sent to your email.");
         }
-
         if (!user.getIsActive()) {
-            throw new RuntimeException("Your account is not active. Please contact support.");
+            throw new RuntimeException("Your account is not active.");
         }
-
-        // Verify password
         if (!passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
             throw new RuntimeException("Invalid email or password");
         }
 
-        // Update last login
-        user.setLastLogin(LocalDateTime.now());
-        userRepository.save(user);
+        // Update lastLogin in a separate transaction so failure doesn't break login
+        updateLastLogin(user.getUserId());
 
-        // Generate JWT token
         String token = jwtUtil.generateToken(user.getUserId(), user.getEmail(), user.getRole().name());
 
-        // Build response
         LoginResponse response = new LoginResponse();
         response.setToken(token);
         response.setUserId(user.getUserId());
@@ -270,6 +261,16 @@ public class AuthService {
         response.setRole(user.getRole().name());
 
         return response;
+    }
+
+    @Transactional
+    public void updateLastLogin(Long userId) {
+        try {
+            userRepository.updateLastLogin(userId, LocalDateTime.now());
+        } catch (Exception e) {
+            // Don't fail login just because lastLogin update failed
+            // log it silently
+        }
     }
     /**
      * Set password using token

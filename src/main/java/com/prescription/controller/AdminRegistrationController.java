@@ -3,7 +3,7 @@ package com.prescription.controller;
 import com.prescription.dto.ApiResponse;
 import com.prescription.dto.ApprovalRequest;
 import com.prescription.dto.PendingUserDTO;
-import com.prescription.security.CustomUserDetails;
+import com.prescription.security.JwtPrincipal;
 import com.prescription.service.AuthService;
 import com.prescription.service.UserService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -48,7 +48,7 @@ public class AdminRegistrationController {
     @PostMapping("/approve")
     public ResponseEntity<ApiResponse<String>> approveRegistration(
             @RequestBody ApprovalRequest request,
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             authService.approveRegistration(
                     request.getUserId(),
@@ -71,7 +71,7 @@ public class AdminRegistrationController {
     @PostMapping("/reject")
     public ResponseEntity<ApiResponse<String>> rejectRegistration(
             @RequestBody ApprovalRequest request,
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             authService.rejectRegistration(
                     request.getUserId(),

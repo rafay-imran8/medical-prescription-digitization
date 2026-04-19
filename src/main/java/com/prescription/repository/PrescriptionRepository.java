@@ -5,6 +5,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import com.prescription.dto.PrescriptionSummaryDTO;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -24,6 +25,30 @@ public interface PrescriptionRepository extends JpaRepository<Prescription, Long
         ORDER BY p.createdAt DESC
     """)
     List<Prescription> findByPatient_PatientIdWithDetails(@Param("patientId") Long patientId);
+
+
+    @Query("""
+    SELECT new com.prescription.dto.PrescriptionSummaryDTO(
+        p.prescriptionId,
+        p.prescriptionDate,
+        p.processingStatus,
+        CAST(p.prescriptionType AS string),
+        p.diagnosis,
+        p.createdAt,
+        p.updatedAt,
+        COUNT(DISTINCT m),
+        COUNT(DISTINCT di)
+    )
+    FROM Prescription p
+    LEFT JOIN p.medicines m
+    LEFT JOIN p.drugInteractions di
+    WHERE p.patient.patientId = :patientId
+    GROUP BY p.prescriptionId, p.prescriptionDate, p.processingStatus,
+             p.prescriptionType, p.diagnosis, p.createdAt, p.updatedAt
+    ORDER BY p.createdAt DESC
+""")
+    List<PrescriptionSummaryDTO> findSummariesByPatientId(@Param("patientId") Long patientId);
+
 
     // For detail view - fetch patient and doctor only
     // Collections will be loaded separately

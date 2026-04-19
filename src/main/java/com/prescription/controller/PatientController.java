@@ -1,12 +1,10 @@
 package com.prescription.controller;
 
-import com.prescription.dto.ApiResponse;
-import com.prescription.dto.DoctorDTO;
-import com.prescription.dto.PrescriptionResponse;
+import com.prescription.dto.*;
 import com.prescription.entity.Patient;
 import com.prescription.entity.Prescription;
 import com.prescription.repository.PrescriptionRepository;
-import com.prescription.security.CustomUserDetails;
+import com.prescription.security.JwtPrincipal;
 import com.prescription.service.AccessControlService;
 import com.prescription.service.PatientService;
 import com.prescription.service.PrescriptionService;
@@ -23,6 +21,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDateTime;
 import java.util.List;
 
 @RestController
@@ -45,7 +44,7 @@ public class PatientController {
 
     @GetMapping("/profile")
     public ResponseEntity<ApiResponse<Patient>> getProfile(
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             Patient patient = patientService.getPatientByUserId(userDetails.getUserId());
             return ResponseEntity.ok(ApiResponse.success(patient));
@@ -59,7 +58,7 @@ public class PatientController {
     @PostMapping("/prescriptions/upload")
     public ResponseEntity<ApiResponse<PrescriptionResponse>> uploadPrescription(
             @RequestParam("image") MultipartFile image,
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             System.out.println("Upload request received from user: " + userDetails.getUserId());
 
@@ -86,11 +85,12 @@ public class PatientController {
     }
 
     @GetMapping("/prescriptions")
-    public ResponseEntity<ApiResponse<List<PrescriptionResponse>>> getMyPrescriptions(
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+    public ResponseEntity<ApiResponse<List<PrescriptionSummaryDTO>>> getMyPrescriptions(
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             Patient patient = patientService.getPatientByUserId(userDetails.getUserId());
-            List<PrescriptionResponse> prescriptions = prescriptionService.getPatientPrescriptions(patient.getPatientId());
+            List<PrescriptionSummaryDTO> prescriptions =
+                    prescriptionRepository.findSummariesByPatientId(patient.getPatientId());
             return ResponseEntity.ok(ApiResponse.success(prescriptions));
         } catch (Exception e) {
             return ResponseEntity
@@ -102,7 +102,7 @@ public class PatientController {
     @GetMapping("/prescriptions/{prescriptionId}")
     public ResponseEntity<ApiResponse<PrescriptionResponse>> getPrescription(
             @PathVariable Long prescriptionId,
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             PrescriptionResponse prescription =
                     prescriptionService.getPrescriptionById(
@@ -130,7 +130,7 @@ public class PatientController {
     @GetMapping("/prescriptions/{id}/image")
     public ResponseEntity<byte[]> getPrescriptionImage(
             @PathVariable Long id,
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             // Get patient
             Patient patient = patientService.getPatientByUserId(userDetails.getUserId());
@@ -180,7 +180,7 @@ public class PatientController {
 
     @GetMapping("/access-requests/pending")
     public ResponseEntity<ApiResponse<List<DoctorDTO>>> getPendingAccessRequests(
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             Patient patient = patientService.getPatientByUserId(userDetails.getUserId());
             List<DoctorDTO> requests = accessControlService.getPendingAccessRequests(patient.getPatientId());
@@ -194,7 +194,7 @@ public class PatientController {
 
     @GetMapping("/access-requests/granted")
     public ResponseEntity<ApiResponse<List<DoctorDTO>>> getGrantedDoctors(
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             Patient patient = patientService.getPatientByUserId(userDetails.getUserId());
             List<DoctorDTO> doctors = accessControlService.getGrantedDoctors(patient.getPatientId());
@@ -206,38 +206,29 @@ public class PatientController {
         }
     }
 
-    @PostMapping("/access/grant")
-    public ResponseEntity<ApiResponse<String>> grantAccessViaToken(@RequestParam String token) {
-        try {
-            accessControlService.grantAccessViaToken(token);
-            return ResponseEntity.ok(ApiResponse.success("Access granted successfully"));
-        } catch (Exception e) {
-            return ResponseEntity
-                    .status(HttpStatus.BAD_REQUEST)
-                    .body(ApiResponse.error(e.getMessage()));
-        }
-    }
 
-    @PostMapping("/access/grant-manual/{doctorId}")
-    public ResponseEntity<ApiResponse<String>> grantAccessManually(
+
+
+    @PostMapping("/access/grant/{doctorId}")
+    public ResponseEntity<ApiResponse<AccessCodeResponse>> grantAccessWithCode(
             @PathVariable Long doctorId,
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             Patient patient = patientService.getPatientByUserId(userDetails.getUserId());
-            accessControlService.grantAccessManually(patient.getPatientId(), doctorId);
-
-            return ResponseEntity.ok(ApiResponse.success("Access granted successfully"));
+            String code = accessControlService.grantAccessWithCode(patient.getPatientId(), doctorId);
+            AccessCodeResponse resp = new AccessCodeResponse(code, "Code generated",
+                    LocalDateTime.now().plusHours(1));
+            return ResponseEntity.ok(ApiResponse.success(resp));
         } catch (Exception e) {
-            return ResponseEntity
-                    .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(ApiResponse.error("Failed to grant access: " + e.getMessage()));
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error(e.getMessage()));
         }
     }
 
     @DeleteMapping("/access/revoke/{doctorId}")
     public ResponseEntity<ApiResponse<String>> revokeAccess(
             @PathVariable Long doctorId,
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             Patient patient = patientService.getPatientByUserId(userDetails.getUserId());
             accessControlService.revokeAccess(patient.getPatientId(), doctorId);

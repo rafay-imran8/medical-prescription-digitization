@@ -2,7 +2,7 @@ package com.prescription.controller;
 
 import com.prescription.dto.*;
 import com.prescription.entity.User;
-import com.prescription.security.CustomUserDetails;
+import com.prescription.security.JwtPrincipal;
 import com.prescription.service.AuthService;
 import com.prescription.service.UserService;
 import org.springframework.beans.factory.annotation.Autowired;

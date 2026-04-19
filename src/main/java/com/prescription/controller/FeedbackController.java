@@ -3,7 +3,7 @@ package com.prescription.controller;
 import com.prescription.dto.ApiResponse;
 import com.prescription.dto.FeedbackResponse;
 import com.prescription.dto.FeedbackRequest;
-import com.prescription.security.CustomUserDetails;
+import com.prescription.security.JwtPrincipal;
 import com.prescription.service.FeedbackService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -25,7 +25,7 @@ public class FeedbackController {
     @PreAuthorize("isAuthenticated()")
     public ResponseEntity<ApiResponse<FeedbackResponse>> submitFeedback(
             @RequestBody FeedbackRequest request,
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             FeedbackResponse feedback = feedbackService.submitFeedback(
                     userDetails.getUserId(),
@@ -41,7 +41,7 @@ public class FeedbackController {
     @GetMapping("/my")
     @PreAuthorize("isAuthenticated()")
     public ResponseEntity<ApiResponse<List<FeedbackResponse>>> getMyFeedbacks(
-            @AuthenticationPrincipal CustomUserDetails userDetails) {
+            @AuthenticationPrincipal JwtPrincipal userDetails) {
         try {
             List<FeedbackResponse> feedbacks = feedbackService.getUserFeedbacks(
                     userDetails.getUserId()

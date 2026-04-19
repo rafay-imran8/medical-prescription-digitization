@@ -2,9 +2,12 @@ package com.prescription.repository;
 
 import com.prescription.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -21,7 +24,17 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
     Optional<User> findByRegistrationToken(String token);
 
-    List<User> findAllByOrderByLastLoginDesc();
+    @Modifying
+    @Query("UPDATE User u SET u.lastLogin = :lastLogin WHERE u.userId = :userId")
+    void updateLastLogin(@Param("userId") Long userId, @Param("lastLogin") LocalDateTime lastLogin);
+
+    @Query("""
+    SELECT u FROM User u
+    LEFT JOIN FETCH u.patient
+    LEFT JOIN FETCH u.doctor
+    ORDER BY u.lastLogin DESC
+""")
+    List<User> findAllWithDetails();
 
     @Query("SELECT u FROM User u WHERE u.accountStatus = 'PENDING' ORDER BY u.createdAt DESC")
     List<User> findPendingRegistrations();
